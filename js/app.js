@@ -18,6 +18,7 @@ const App = (() => {
     const P = PublicViews, A = AdminViews;
     if (seg[0] === "admin") {
       if (seg[1] === "login") return { view: A.login, query, chrome: "bare" };
+      if (HaadiyaAuth.isPending()) return { view: { title: () => "Admin — Haadiya Syar’i", html: () => '<div class="login-wrap"><div class="login-card" role="status">Checking your admin session…</div></div>', mount() {} }, query, chrome: "bare" };
       if (!isAdmin()) return { redirect: "#/admin/login" };
       const chrome = "admin";
       if (!seg[1]) return { view: A.dashboard, query, chrome };
@@ -50,7 +51,7 @@ const App = (() => {
     return { view: { title: () => "Not Found — Haadiya", html: () => `<div class="container section">${UI.emptyState({ icon: "search", title: "Page not found", body: "The link you opened is not available.", action: '<a class="btn btn-primary" href="#/">Back to Home</a>' })}</div>`, mount() {} }, query, chrome: "public" };
   }
 
-  function isAdmin() { try { return sessionStorage.getItem("haadiya_admin") === "1"; } catch (e) { return false; } }
+  function isAdmin() { return HaadiyaAuth.isAdmin(); }
   function verifiedOrders() {
     try { return JSON.parse(sessionStorage.getItem("haadiya_verified_orders") || "[]"); } catch (e) { return []; }
   }
@@ -269,32 +270,35 @@ const App = (() => {
       go("#/pesanan/" + el.dataset.id + "/pembayaran");
     },
     "hero-upload": () => document.getElementById("hero-file")?.click(),
-    "hero-remove": () => {
-      Store.updateSettings({ heroImage: null });
+    "hero-remove": async () => {
+      const saved = await Store.updateSettings({ heroImage: null });
+      if (!saved.ok) { UI.toast(saved.message, "error"); return; }
       UI.toast("Custom hero removed — back to the default image.");
       refresh();
     },
-    "hero-add-path": () => {
+    "hero-add-path": async () => {
       const input = document.getElementById("hero-path");
       const v = input ? input.value.trim() : "";
       if (!v) { UI.toast("Enter an image path or URL first.", "error"); return; }
-      Store.updateSettings({ heroImage: v });
+      const saved = await Store.updateSettings({ heroImage: v });
+      if (!saved.ok) { UI.toast(saved.message, "error"); return; }
       UI.toast("Hero image updated.");
       refresh();
     },
     "hero-video-upload": () => document.getElementById("hero-video-file")?.click(),
     "hero-video-remove": async () => {
-      try { await UI.VideoStore.del("hero"); } catch (e) {}
-      Store.updateSettings({ heroVideo: null });
+      const saved = await Store.updateSettings({ heroVideo: null });
+      if (!saved.ok) { UI.toast(saved.message, "error"); return; }
       await resolveHeroVideo();
       UI.toast("Hero video removed — back to the photo.");
       refresh();
     },
-    "hero-video-add-path": () => {
+    "hero-video-add-path": async () => {
       const input = document.getElementById("hero-video-path");
       const v = input ? input.value.trim() : "";
       if (!v) { UI.toast("Enter a video path or URL first.", "error"); return; }
-      Store.updateSettings({ heroVideo: v });
+      const saved = await Store.updateSettings({ heroVideo: v });
+      if (!saved.ok) { UI.toast(saved.message, "error"); return; }
       UI.toast("Hero video updated.");
       refresh();
     },
@@ -305,20 +309,22 @@ const App = (() => {
       else { v.pause(); el.innerHTML = UI.icon("play"); el.setAttribute("aria-label", "Play background video"); }
     },
     "landing-save": () => AdminViews.saveLanding(),
-    "values-save": () => {
+    "values-save": async () => {
       const values = [0, 1, 2].map(i => ({
         label: document.getElementById("val-label-" + i).value.trim(),
         title: document.getElementById("val-title-" + i).value.trim(),
         text: document.getElementById("val-text-" + i).value.trim()
       }));
       if (values.some(v => !v.title)) { UI.toast("Every value needs a title.", "error"); return; }
-      Store.updateSettings({ values });
+      const saved = await Store.updateSettings({ values });
+      if (!saved.ok) { UI.toast(saved.message, "error"); return; }
       UI.toast("Home values saved — the storefront uses the new copy.");
       refresh();
     },
     "banner-save": () => AdminViews.saveBanner(),
-    "banner-clear": () => {
-      Store.updateSettings({ bannerText: "" });
+    "banner-clear": async () => {
+      const saved = await Store.updateSettings({ bannerText: "" });
+      if (!saved.ok) { UI.toast(saved.message, "error"); return; }
       UI.toast("Banner cleared — the scrolling text is hidden.");
       refresh();
     },
@@ -333,59 +339,72 @@ const App = (() => {
     "photo-primary": el => AdminViews.PhotoActions.primary(Number(el.dataset.index)),
     "photo-add-path": () => AdminViews.PhotoActions.addPath(),
     "logo-upload": el => document.getElementById("logo-file-" + (el.dataset.slot || "header"))?.click(),
-    "logo-remove": el => {
+    "logo-remove": async el => {
       const slot = el.dataset.slot === "footer" ? "footer" : "header";
-      Store.updateSettings({ [slot === "footer" ? "logoFooter" : "logoHeader"]: null });
+      const saved = await Store.updateSettings({ [slot === "footer" ? "logoFooter" : "logoHeader"]: null });
+      if (!saved.ok) { UI.toast(saved.message, "error"); return; }
       UI.toast(`${slot === "footer" ? "Footer" : "Header"} logo removed — back to the text wordmark.`);
       refresh();
     },
-    "delete-product": el => {
+    "delete-product": async el => {
       const slug = el.dataset.slug;
       const p = Store.product(slug);
       if (!p) return;
       if (!confirm(`Delete "${p.name}" and its ${p.variants.length} variant(s) from the catalog?\nOld order history keeps its snapshot. This cannot be undone.`)) return;
-      const res = Store.deleteProduct(slug);
+      const res = await Store.deleteProduct(slug);
       if (!res.ok) { UI.toast(res.message, "error"); return; }
       UI.toast(`"${p.name}" deleted from the catalog.`);
       if (parseHash().path !== "/admin/produk") go("#/admin/produk"); else refresh();
     },
-    "voucher-toggle": el => {
+    "voucher-toggle": async el => {
       const v = Store.voucher(el.dataset.code);
       if (!v) return;
-      Store.saveVoucher({ ...v, active: el.checked }, v.code);
+      const res = await Store.saveVoucher({ ...v, active: el.checked }, v.code);
+      if (!res.ok) { el.checked = v.active; UI.toast(res.message,"error"); return; }
       UI.toast(`Voucher ${v.code} ${el.checked ? "activated" : "deactivated"}.`);
       refresh();
     },
-    "voucher-delete": el => {
+    "voucher-delete": async el => {
       if (!confirm(`Delete voucher ${el.dataset.code}? Buyers will no longer be able to apply it.`)) return;
-      Store.deleteVoucher(el.dataset.code);
+      const res = await Store.deleteVoucher(el.dataset.code);
+      if (!res.ok) { UI.toast(res.message,"error"); return; }
       UI.toast("Voucher deleted.");
       refresh();
     },
-    "origin-submit": () => {
+    "origin-submit": async () => {
       const input = document.getElementById("set-origin");
       if (!input) return;
       const v = input.value.trim();
       if (!v) { UI.toast("Enter a valid shipping origin address first.", "error"); input.focus(); return; }
-      Store.updateSettings({ originAddress: v });
+      const saved = await Store.updateSettings({ originAddress: v });
+      if (!saved.ok) { UI.toast(saved.message, "error"); return; }
       UI.toast("Origin saved — checkout & catalog use the latest address for rates.");
       refresh();
     },
-    "origin-remove": () => {
+    "origin-remove": async () => {
       const input = document.getElementById("set-origin");
       if (input && input.value.trim() && !confirm("Remove the shipping origin? Rates cannot be calculated until it is set again.")) return;
-      Store.updateSettings({ originAddress: "" });
+      const saved = await Store.updateSettings({ originAddress: "" });
+      if (!saved.ok) { UI.toast(saved.message, "error"); return; }
       UI.toast("Origin removed — shipping calculation waits for a new address.");
       refresh();
     },
-    "admin-logout": () => { try { sessionStorage.removeItem("haadiya_admin"); } catch (e) {} UI.toast("You have signed out."); go("#/admin/login"); },
+    "admin-logout": async el => {
+      if (el.disabled) return;
+      el.disabled = true;
+      const result = await HaadiyaAuth.signOut();
+      if (result.ok) UI.toast("You have signed out.");
+      else UI.toast(result.message, "error");
+      go("#/admin/login");
+    },
     "add-variant-row": () => AdminViews.addVariantRow(),
     "save-all-stock": () => AdminViews.saveAllStock(),
-    "reset-demo": () => {
-      if (!confirm("Reset ALL data (catalog, stock, cart, vouchers, orders) to the initial contents of js/data.js? Unsaved changes will be lost.")) return;
-      Store.resetData();
-      UI.toast("Data restored to its initial state.");
-      refresh();
+    "media-import": () => document.getElementById("media-backup-file")?.click(),
+    "cloud-import": () => document.getElementById("cloud-backup-file")?.click(),
+    "cloud-reload": async () => {
+      const r = await Store.pull();
+      if (!r.ok) UI.toast(r.message,"error");
+      else { UI.toast("Cloud content checked."); refresh(); }
     }
   };
   document.addEventListener("click", e => {
@@ -446,7 +465,29 @@ const App = (() => {
     }
   } catch (e) {}
 
+  document.addEventListener("haadiya:auth-change", () => {
+    const path = parseHash().path;
+    if (path === "/admin" || (path.startsWith("/admin/") && path !== "/admin/login")) {
+      // Keep active form edits intact when a token refresh merely confirms access.
+      if (!isAdmin() || currentView === null || !document.body.classList.contains("admin-body")) refresh();
+    }
+  });
+  document.addEventListener("haadiya:sync-status", () => {
+    const status = Store.status();
+    const el = document.getElementById("cloud-status");
+    if (el) el.textContent = status.busy ? "Cloud operation in progress..." : status.message;
+    const btn = document.querySelector('[data-action="cloud-import"]');
+    if (btn) btn.disabled = status.busy || status.state !== "empty";
+    const mediaBtn=document.querySelector('[data-action="media-import"]');if(mediaBtn)mediaBtn.disabled=status.busy || status.state!=="ready";
+  });
+  document.addEventListener("haadiya:cloud-change", () => { resolveHeroVideo(); refresh(); });
+  // Refresh on focus and periodically only on pages without forms or selection state.
+  function safePublicRefresh() { const p = parseHash().path; if (p === "/" || p === "/produk" || p === "/tentang" || p === "/faq" || p === "/kontak" || p === "/privasi" || p === "/syarat" || p.startsWith("/bantuan")) Store.pull(); }
+  window.addEventListener("focus", safePublicRefresh);
+  setInterval(() => { if (!document.hidden) safePublicRefresh(); }, 30000);
   render();
+  HaadiyaAuth.initialize();
+  Store.pull();
   resolveHeroVideo();
   return { go, refresh, render, verifyOrder, isOrderVerified, isAdmin, parseHash, resolveHeroVideo, heroVideoUrl: () => heroVideoObjectUrl };
 })();

@@ -234,7 +234,7 @@ const UI = (() => {
   };
   function validateVideoFile(file) {
     if (file.type !== "video/mp4" && !/\.mp4$/i.test(file.name)) throw new Error("Use an MP4 video file.");
-    if (file.size > 60 * 1024 * 1024) throw new Error("Maximum video size is 60 MB. Compress the video or use a path/URL instead.");
+    if (file.size > 50 * 1000 * 1000) throw new Error("Maximum video size is 50 MB. Compress the video or use a path/URL instead.");
     return file;
   }
 

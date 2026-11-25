@@ -102,8 +102,8 @@ const integrationStatus = () => ([
     todo: "Configure a transactional email service. Never claim notifications were sent before the service exists."
   },
   {
-    id: "auth", name: "Production admin authentication",
-    connected: false,
-    todo: "Replace the preview login with server authentication (expiring sessions, rate limiting, credential reset)."
+    id: "auth", name: "Supabase admin authentication",
+    connected: window.HaadiyaAuth.isAdmin(),
+    todo: "Email/password sign-in and admin_users membership verified. Catalog is synchronized; orders are still local preview data. Database and Storage policies must be tested before launch."
   }
 ]);

@@ -79,10 +79,5 @@ window.HAADIYA_SEED = {
     { code: "WELCOME10", type: "percent", value: 10, minSubtotal: 0, maxDiscount: null, quota: null, used: 0, active: true, expiresAt: null }
   ],
 
-  initialOrders: [],
-
-  /* Admin credentials — NEVER shown in any UI.
-     The preview stores them client-side; production requires server
-     authentication (expiring sessions, rate limiting, credential reset). */
-  adminAuth: { username: "admin", password: "aliakarenina123" }
+  initialOrders: []
 };

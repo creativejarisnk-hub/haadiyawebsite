@@ -3,7 +3,7 @@
 Website satu brand sesuai `Haadiya_design.md`. Bahasa Indonesia, harga IDR, responsif
 (390 / 768 / 1440 px), tanpa build step — buka `index.html` langsung di browser.
 
-> **Status: integrasi belum aktif.** Katalog awal kosong — isi lewat admin.
+> **Status: Supabase Client & Admin Auth dipasang (Step 3). Konten masih lokal.** Katalog awal kosong — isi lewat admin.
 > Payment gateway dan layanan ongkir **belum terhubung**: pesanan tersimpan
 > berstatus *Menunggu Pembayaran*, stok ditahan (reserved), dan pembayaran
 > diselesaikan melalui konfirmasi admin sampai gateway terpasang.
@@ -18,7 +18,9 @@ sehingga berjalan tanpa server. Data tersimpan di `localStorage` browser.
 
 | File | Isi |
 | --- | --- |
-| `js/data.js` | **Sumber data awal**: pengaturan, koleksi, halaman statis, kredensial admin. Katalog awal kosong — isi lewat admin atau edit file ini. |
+| `js/data.js` | **Sumber data awal**: pengaturan, koleksi, halaman statis. Katalog awal kosong — isi lewat admin atau edit file ini. |
+| `js/supabase-client.js` | Supabase browser client dan pemeriksaan koneksi. |
+| `js/supabase-auth.js` | Autentikasi admin dan pemeriksaan keanggotaan admin_users. |
 | `js/store.js` | Store bersama katalog publik + keranjang + admin (localStorage). Produksi: ganti dengan `orderService`/`inventoryService` server. |
 | `js/adapters.js` | `paymentAdapter` & `shippingAdapter` — struktur integrasi, status *needs integration*, daftar konfigurasi. |
 | `js/public.js` | Semua halaman publik. |
@@ -56,9 +58,7 @@ sehingga berjalan tanpa server. Data tersimpan di `localStorage` browser.
   tampil sebagai deskripsi berparagraf di halaman produk.
 - Perubahan langsung tampil di katalog publik (satu sumber data).
 
-**Login admin:** kredensial disimpan di `js/data.js` (`adminDemo`) dan tidak
-pernah ditampilkan di UI. Karena berada di sisi klien, ini bukan keamanan
-sungguhan — ganti dengan autentikasi server sebelum produksi.
+**Login admin:** gunakan email dan password akun Supabase Auth yang terdaftar di tabel `admin_users`. Sesi login dikelola Supabase SDK; akses dashboard ditolak jika verifikasi gagal. Pengujian akun asli dan kebijakan RLS masih diperlukan. Lihat `STEP-3-TEST.txt`.
 
 ## Integrasi yang belum terhubung (wajib sebelum launch)
 
@@ -76,7 +76,7 @@ sungguhan — ganti dengan autentikasi server sebelum produksi.
    memakai localStorage dan **bukan** pengganti server.
 4. **Notifikasi** email/WhatsApp transaksional (belum terpasang — jangan klaim
    notifikasi terkirim).
-5. **Autentikasi admin produksi** (sesi berakhir, rate-limit, reset kredensial).
+5. **Verifikasi autentikasi admin produksi** (uji akun asli, RLS akses tulis, dan prosedur reset kredensial).
 6. **Aset & kebijakan resmi**: logo, font, palet final, foto produk asli, data
    ukuran/bahan/berat asli, kontak, kebijakan retur/privasi/syarat.
 
@@ -108,3 +108,21 @@ Status integrasi juga tampil di **Admin → Ringkasan → Status integrasi**.
 - `localStorage` dapat dihapus pengguna; bukan penyimpanan pesanan sungguhan.
 - Penanda "Demo katalog" tampil global; hapus hanya setelah semua konten asli
   menggantikannya (ubah `meta.demo` dan banner di `index.html`).
+## Step 4B — Supabase content synchronization (test release)
+
+See `STEP-4-TEST.txt` before using this build. Cloud initialization is explicit:
+only an authorized admin may import a version-2 backup into an empty `main`
+record. Public content uses an allowlist and updates are conditional on the last
+observed revision. Existing content is not automatically overwritten. No schema
+changes or new tables are required for this test. Local order/payment preview
+remains non-production. The public JSON record is readable by anyone, including
+its draft product data and voucher codes; private content requires separate
+protected storage. Legacy backup and Step 3 should remain intact.
+
+## Step 5D - Supabase Storage (test release)
+
+See STEP-5-TEST.txt. Public media uses the haadiya-media bucket and only HTTPS
+references are stored in the public JSON. Images are downscaled in the existing
+editor; videos are uploaded directly. Media migration is separate from text import
+and fills missing fields only. Files are not automatically deleted from Storage.
+Cloud schema 2 is not compatible with Step 4; keep old files only as offline backup.
