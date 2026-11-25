@@ -3,7 +3,9 @@
    these functions with calls to orderService / inventoryService on your
    server; prices, stock, discounts, and totals MUST be recomputed server-side. */
 const Store = (() => {
-  const DB_KEY = "haadiya_db_v1";
+  const LEGACY_KEY = "haadiya_db_v1";
+  const DB_KEY = "haadiya_db_sync_v1";
+  let cloud = null, syncState = "loading", syncMessage = "Checking cloud content...", busy = false, staging = false;
   const CART_KEY = "haadiya_cart_v1";
   let db, cart;
   const memory = {};
@@ -71,7 +73,7 @@ const Store = (() => {
     save();
   }
   function load() {
-    const raw = read(DB_KEY);
+    const raw = read(DB_KEY) || read(LEGACY_KEY);
     let old = null;
     if (raw) { try { old = JSON.parse(raw); } catch (e) { old = null; } }
     if (!old) seed();
@@ -80,6 +82,8 @@ const Store = (() => {
     /* kunci baru pada database v2 yang sudah ada */
     const seedS = window.HAADIYA_SEED.settings;
     let touched = false;
+    // Remove only the obsolete preview credential; keep all catalog and order data.
+    if (Object.prototype.hasOwnProperty.call(db, "adminAuth")) { delete db.adminAuth; touched = true; }
     if (!Array.isArray(db.settings.values) || !db.settings.values.length) { db.settings.values = JSON.parse(JSON.stringify(seedS.values)); touched = true; }
     if (db.settings.heroVideo === undefined) { db.settings.heroVideo = null; touched = true; }
     if (touched) save();
@@ -87,9 +91,9 @@ const Store = (() => {
     try { cart = rawCart ? JSON.parse(rawCart) : []; } catch (e) { cart = []; }
     if (!Array.isArray(cart)) cart = [];
   }
-  function save() { write(DB_KEY, JSON.stringify(db)); }
+  function save() { if (!staging) write(DB_KEY, JSON.stringify(db)); }
   function saveCart() { write(CART_KEY, JSON.stringify(cart)); }
-  function emit() { document.dispatchEvent(new CustomEvent("haadiya:change")); }
+  function emit() { if (!staging) document.dispatchEvent(new CustomEvent("haadiya:change")); }
 
   /* ---- Catalog ---- */
   function products(includeAll) {
@@ -374,16 +378,140 @@ const Store = (() => {
   function settings() { return db.settings; }
   function updateSettings(patch) { Object.assign(db.settings, patch); save(); emit(); return { ok: true }; }
   function inventoryEvents() { return (db.inventoryEvents || []).slice().reverse(); }
-  function resetData() {
-    seed();
-    cart = [];
-    saveCart(); emit();
+  function resetData() { return {ok:false,message:"Reset disabled in cloud mode to protect your data."}; }
+
+  const mediaKeys = ["logoHeader","logoFooter","heroImage","heroVideo"];
+  const own = (o,k) => !!o && Object.prototype.hasOwnProperty.call(o,k);
+  function textOnly(source) {
+    const c=clone(source);
+    for(const p of c.products||[]) {delete p.images;delete p.colorImages;}
+    for(const k of mediaKeys) delete c.settings[k];
+    return c;
   }
+  function carryCloudMedia(candidate, previous) {
+    const c=textOnly(candidate);
+    for(const p of c.products) {
+      const old=previous.products.find(x=>(p.id && x.id===p.id)||x.slug===p.slug);
+      for(const k of ["images","colorImages"]) if(own(old,k)) p[k]=clone(old[k]);
+    }
+    for(const k of mediaKeys) if(own(previous.settings,k)) c.settings[k]=previous.settings[k];
+    return c;
+  }
+  function projectBackup(source) {return HaadiyaContent.project(textOnly(source));}
+  const clone = x => JSON.parse(JSON.stringify(x));
+  const failure = message => ({ok:false,message});
+  function status() { return {state:syncState,message:syncMessage,busy}; }
+  function announce() { document.dispatchEvent(new CustomEvent("haadiya:sync-status")); }
+  function applyCloud(content, target = db) {
+    const old = target.products || [];
+    const oldV = target.vouchers || [];
+    target.products = content.products.map(p => {
+      const prev = old.find(x => (p.id && p.id === x.id) || p.slug === x.slug);
+      return {...p,images:own(p,"images") ? clone(p.images) : (prev?.images || []),colorImages:own(p,"colorImages") ? clone(p.colorImages) : (prev?.colorImages || {}),variants:p.variants.map(v => ({...v,reserved:prev?.variants.find(x=>x.sku===v.sku)?.reserved || 0}))};
+    });
+    target.vouchers = content.vouchers.map(v => ({...v,used:oldV.find(x=>x.code===v.code)?.used || 0}));
+    const media = Object.fromEntries(mediaKeys.map(k => [k,own(content.settings,k) ? content.settings[k] : (target.settings[k] ?? null)]));
+    target.settings = {...clone(window.HAADIYA_SEED.settings),...clone(content.settings),...media};
+  }
+  async function pull() {
+    if (busy) return failure("Another cloud operation is in progress.");
+    busy = true; announce();
+    try {
+      const result = await HaadiyaContent.read();
+      const changed = !cloud || cloud.revision !== result.revision || JSON.stringify(cloud.content) !== JSON.stringify(result.content);
+      cloud = result;
+      syncState = result.content ? "ready" : "empty";
+      syncMessage = result.content ? "Cloud content connected." : "Cloud is empty. Import your backup once to activate synchronization.";
+      if (result.content && changed) { applyCloud(result.content); save(); emit(); document.dispatchEvent(new CustomEvent("haadiya:cloud-change")); }
+      return {ok:true,changed};
+    } catch(e) { syncState = "error"; syncMessage = e.message; return failure(e.message); }
+    finally { busy = false; announce(); }
+  }
+  async function importBackup(source) {
+    if (!HaadiyaAuth.isAdmin()) return failure("Verified admin access required.");
+    if (busy) return failure("Another cloud operation is in progress.");
+    busy = true; announce();
+    try {
+      if (source.version !== 2) throw Error("Only a version 2 Haadiya backup is supported.");
+      const content = projectBackup(source);
+      const previous = await HaadiyaContent.read();
+      if (previous.content !== null) throw Error("Cloud already contains content. Import blocked to prevent overwrite.");
+      const result = await HaadiyaContent.write(content,previous,true);
+      cloud = result; applyCloud(result.content); save(); emit();
+      syncState = "ready"; syncMessage = "Backup imported. Cloud content connected.";
+      return {ok:true};
+    } catch(e) { return failure(e.message); }
+    finally { busy = false; announce(); }
+  }
+  async function commit(fn,args) {
+    if (!HaadiyaAuth.isAdmin()) return failure("Verified admin access required.");
+    if (busy) return failure("Another cloud operation is in progress. Please try again.");
+    if (syncState !== "ready" || !cloud?.content) return failure("Cloud not ready. Import backup or reload before saving.");
+    busy = true; announce();
+    const original = db; let candidate;
+    try {
+      db = clone(original); staging = true;
+      let result;
+      try { result = fn(...args); candidate = db; } finally { db = original; staging = false; }
+      if (!result.ok) return result;
+      const source = carryCloudMedia(candidate,cloud.content);
+      if (fn === addProduct || fn === updateProduct) {
+        const patch=fn===addProduct?args[0]:args[1];
+        const p=source.products.find(x=>x.slug===(patch.slug || args[0]));
+        if (own(patch,"images")) p.images=await HaadiyaMedia.list(patch.images);
+        if (own(patch,"colorImages")) p.colorImages=await HaadiyaMedia.colors(patch.colorImages);
+      }
+      if (fn === updateSettings) for(const k of mediaKeys) if(own(args[0],k)) source.settings[k]=await HaadiyaMedia.resolve(args[0][k],k==="heroVideo"?"video":"image");
+      const projected = HaadiyaContent.project(source);
+      if (JSON.stringify(projected) !== JSON.stringify(cloud.content)) {
+        cloud = await HaadiyaContent.write(projected,cloud);
+      }
+      applyCloud(cloud.content,candidate);
+      db = candidate; save(); emit();
+      syncMessage = "Cloud content saved.";
+      return {ok:true};
+    } catch(e) { syncState = "error"; syncMessage = e.message + " Reload before retrying; check whether the cloud accepted the last request."; return failure(syncMessage); }
+    finally { busy = false; announce(); }
+  }
+  async function importMedia(source) {
+    if (!HaadiyaAuth.isAdmin() || busy || syncState!=="ready" || !cloud?.content) return failure("Verified admin and ready cloud required.");
+    if (source.version!==2 || !Array.isArray(source.products) || !source.settings) return failure("Invalid version 2 backup.");
+    busy=true;announce();
+    try {
+      const next=clone(cloud.content); let imported=0; const skipped=[];
+      const usable=v=>HaadiyaMedia.isUrl(v) || (typeof v==="string" && /^data:image\/(jpeg|png|webp|gif);base64,/i.test(v));
+      const validList=(arr,label)=>{if(!Array.isArray(arr))return [];const out=arr.filter(usable);if(out.length!==arr.length)skipped.push(label+": local path(s) skipped; upload original file.");return out;};
+      for(const p of next.products) {
+        const old=source.products.find(x=>x && ((p.id && x.id===p.id)||x.slug===p.slug)); if(!old)continue;
+        if(!own(p,"images")){const a=validList(old.images,p.name);if(a.length){p.images=await HaadiyaMedia.list(a);imported+=a.length;}}
+        if(!own(p,"colorImages") && old.colorImages && typeof old.colorImages==="object") {
+          const entries=[];for(const [k,a] of Object.entries(old.colorImages)){const list=validList(a,p.name+" / "+k);if(list.length)entries.push([k,await HaadiyaMedia.list(list)]);}
+          if(entries.length){p.colorImages=Object.fromEntries(entries);imported+=entries.reduce((n,[,a])=>n+a.length,0);}
+        }
+      }
+      for(const k of mediaKeys) if(!own(next.settings,k) && source.settings[k]) {
+        const v=source.settings[k];
+        if((k==="heroVideo" && HaadiyaMedia.isUrl(v)) || (k!=="heroVideo" && usable(v))){next.settings[k]=await HaadiyaMedia.resolve(v,k==="heroVideo"?"video":"image");imported++;}
+        else skipped.push(k+": upload original file manually.");
+      }
+      if(imported){cloud=await HaadiyaContent.write(next,cloud);applyCloud(cloud.content);save();emit();}
+      syncMessage="Media migration finished. "+imported+" reference(s) saved.";
+      return {ok:true,imported,skipped};
+    } catch(e) {syncState="error";syncMessage=e.message+" Reload before retrying. Uploaded but unreferenced files may remain.";return failure(syncMessage);}
+    finally {busy=false;announce();}
+  }
+  function setStocks(changes) {
+    for (const [sku,n] of changes) { const r = setStock(sku,n,"admin","Adjustment from inventory page"); if (!r.ok) return r; }
+    return {ok:true};
+  }
+  const remote = fn => (...args) => commit(fn,args);
+  const localOrder = fn => (...args) => busy ? failure("Cloud operation in progress. Try again.") : fn(...args);
+
 
   load();
   window.addEventListener("storage", e => {
-    if (e.key === DB_KEY || e.key === CART_KEY) {
-      load();
+    if (e.key === CART_KEY && !busy) {
+      try { cart = JSON.parse(read(CART_KEY) || "[]"); } catch (_) { cart = []; }
       document.dispatchEvent(new CustomEvent("haadiya:external-change"));
       emit();
     }
@@ -391,9 +519,9 @@ const Store = (() => {
   return {
     products, product, variant, available, productStock, priceRange, imagesFor,
     cartItems, cartCount, cartSubtotal, addToCart, setCartQty, removeFromCart, clearCart, cartIssues,
-    vouchers, voucher, validateVoucher, saveVoucher, deleteVoucher,
-    orders, order, findOrder, createOrder, cancelOrder, retryPayment, setFulfillment, FULFILLMENT_FLOW,
-    updateProduct, addProduct, deleteProduct, setStock,
-    settings, updateSettings, inventoryEvents, resetData
+    vouchers, voucher, validateVoucher, saveVoucher:remote(saveVoucher), deleteVoucher:remote(deleteVoucher),
+    orders, order, findOrder, createOrder:localOrder(createOrder), cancelOrder:localOrder(cancelOrder), retryPayment:localOrder(retryPayment), setFulfillment:localOrder(setFulfillment), FULFILLMENT_FLOW,
+    updateProduct:remote(updateProduct), addProduct:remote(addProduct), deleteProduct:remote(deleteProduct), setStock:remote(setStock), setStocks:remote(setStocks),
+    settings, updateSettings:remote(updateSettings), inventoryEvents, resetData, pull, status, importBackup, importMedia, projectBackup
   };
 })();

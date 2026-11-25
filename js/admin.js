@@ -1,6 +1,5 @@
 /* Admin dashboard — reads & writes the same Store as the public catalog.
-   The preview login is client-side only. Production requires server
-   authentication (expiring sessions, rate limiting, credential reset). */
+   Admin identity is verified by Supabase Auth and admin_users RLS. */
 const AdminViews = (() => {
   const { esc, rupiah, icon, img } = UI;
 
@@ -23,7 +22,7 @@ const AdminViews = (() => {
           <button class="adm-nav-link" data-action="admin-logout">${icon("logout")} Sign Out</button>
         </div>
       </aside>
-      <div class="admin-main">${content}</div>
+      <div class="admin-main"><div id="cloud-status" role="status" style="font-size:13px;margin-bottom:12px;color:var(--text-2)">${esc(Store.status().message)}</div>${content}</div>
     </div>`;
   }
   const head = (title, sub, right) => `<div class="admin-head"><div><h1 class="serif">${esc(title)}</h1>${sub ? `<p>${sub}</p>` : ""}</div>${right || ""}</div>`;
@@ -35,7 +34,7 @@ const AdminViews = (() => {
       return `<div class="login-wrap"><form class="login-card" id="login-form" novalidate>
         <div><span class="wordmark-main">Haadiya</span>
         <p style="font-size:13px;color:var(--text-2)">Sign in to the admin dashboard</p></div>
-        ${UI.field({ id: "login-user", label: "Username", required: true, autocomplete: "username" })}
+        ${UI.field({ id: "login-user", label: "Email", type: "email", required: true, autocomplete: "username" })}
         ${UI.field({ id: "login-pass", label: "Password", type: "password", required: true, autocomplete: "current-password" })}
         <button class="btn btn-primary btn-block" type="submit">${icon("lock")} Sign In</button>
         <p class="error-msg" id="login-error" hidden role="alert"></p>
@@ -45,19 +44,36 @@ const AdminViews = (() => {
     },
     mount() {
       const form = document.getElementById("login-form");
-      form.addEventListener("submit", e => {
+      form.addEventListener("submit", async e => {
         e.preventDefault();
-        const u = form.querySelector("#login-user").value.trim();
-        const p = form.querySelector("#login-pass").value;
-        const auth = window.HAADIYA_SEED.adminAuth;
+        const email = form.querySelector("#login-user").value.trim();
+        const passwordInput = form.querySelector("#login-pass");
         const err = document.getElementById("login-error");
-        if (u === auth.username && p === auth.password) {
-          sessionStorage.setItem("haadiya_admin", "1");
-          UI.toast("Signed in as admin.");
-          App.go("#/admin");
-        } else {
-          err.innerHTML = icon("alert") + " Incorrect username or password.";
+        const button = form.querySelector('button[type="submit"]');
+        if (button.disabled) return;
+        err.hidden = true;
+        if (!email || !form.querySelector("#login-user").validity.valid || !passwordInput.value) {
+          err.textContent = "Enter a valid email and password.";
           err.hidden = false;
+          return;
+        }
+        const original = button.innerHTML;
+        button.disabled = true;
+        button.textContent = "Signing in...";
+        try {
+          const result = await HaadiyaAuth.signIn(email, passwordInput.value);
+          passwordInput.value = "";
+          if (!form.isConnected) return;
+          if (result.ok) {
+            UI.toast("Signed in as admin.");
+            App.go("#/admin");
+          } else {
+            err.textContent = result.message;
+            err.hidden = false;
+          }
+        } finally {
+          button.disabled = false;
+          button.innerHTML = original;
         }
       });
     }
@@ -76,7 +92,7 @@ const AdminViews = (() => {
       const toShip = os.filter(o => o.paymentStatus === "berhasil" && o.fulfillmentStatus === "diproses").length;
       const vs = Store.vouchers();
       return shell("#/admin", `
-        ${head("Overview", "All figures come from this browser's local data.")}
+        ${head("Overview", "Catalog, settings and media use Supabase. Orders remain local preview data.")}
         <div class="stat-grid">
           <div class="stat-card"><p class="s-label">Products</p><p class="s-value">${ps.length}</p><p class="s-sub">${ps.filter(p => p.status === "published").length} published</p></div>
           <div class="stat-card"><p class="s-label">Active SKUs</p><p class="s-value">${variants.filter(v => v.active).length}</p><p class="s-sub">${variants.filter(v => v.active && Store.available(v) <= 0).length} sold out</p></div>
@@ -98,13 +114,40 @@ const AdminViews = (() => {
           <div class="panel-head"><h2 class="serif">Vouchers</h2><a class="btn btn-ghost btn-sm" href="#/admin/voucher">Manage vouchers ${icon("arrow")}</a></div>
           <p style="font-size:13.5px;color:var(--text-2)">${vs.length} voucher(s) · ${vs.filter(v => v.active).length} active · ${vs.reduce((s, v) => s + (v.used || 0), 0)} total redemptions.</p>
         </div>
-        <div class="panel danger-panel">
-          <div class="panel-head"><h2 class="serif">Reset data</h2></div>
-          <p style="font-size:13.5px;color:var(--text-2);margin-bottom:14px">Reset restores the catalog, stock, cart, vouchers, and orders to the initial contents of <code>js/data.js</code>. Unsaved changes will be lost.</p>
-          <button class="btn btn-danger btn-sm" data-action="reset-demo">${icon("refresh")} Reset All Data</button>
+        <div class="panel">
+          <div class="panel-head"><h2 class="serif">Cloud content</h2></div>
+          <p style="font-size:13.5px;color:var(--text-2);margin-bottom:14px">Import your original JSON backup once, only if the cloud is empty. Products (including drafts), voucher codes and public settings will be readable by anyone through the database. Orders, customer records and media are not imported.</p>
+          <button class="btn btn-primary btn-sm" data-action="cloud-import" ${Store.status().state !== "empty" ? "disabled" : ""}>Import backup to Supabase</button>
+          <input type="file" id="cloud-backup-file" accept=".json,application/json" hidden>
+          <button class="btn btn-outline btn-sm" data-action="cloud-reload">Reload cloud content</button>
+          <hr style="margin:16px 0">
+          <p class="hint">Import existing photos and logos from your original backup. Only missing cloud media fields are filled; existing cloud media and text are not overwritten. Local file paths and IndexedDB videos must be uploaded manually.</p>
+          <button class="btn btn-outline btn-sm" data-action="media-import" ${Store.status().state !== "ready" || Store.status().busy ? "disabled" : ""}>Import media from backup</button>
+          <input type="file" id="media-backup-file" accept=".json,application/json" hidden>
         </div>`);
     },
-    mount() {}
+    mount() {
+      document.getElementById("media-backup-file")?.addEventListener("change",async e=>{
+        const file=e.target.files[0];e.target.value="";if(!file)return;
+        try {const source=JSON.parse(await file.text());if(!confirm("Upload missing public product photos, logos and banner media from this backup? Do not include private images."))return;
+          const r=await Store.importMedia(source);if(!r.ok){UI.toast(r.message,"error");return;}
+          alert(r.imported+" media reference(s) saved."+(r.skipped.length?"\n"+r.skipped.join("\n"):""));App.refresh();
+        }catch(err){UI.toast(err.message,"error");}
+      });
+      document.getElementById("cloud-backup-file")?.addEventListener("change", async e => {
+        const file = e.target.files[0]; e.target.value = "";
+        if (!file) return;
+        try {
+          const source = JSON.parse(await file.text());
+          if (source.version !== 2) throw Error("This is not a version 2 Haadiya backup.");
+          const content = Store.projectBackup(source);
+          if (!confirm(`Import ${content.products.length} product(s) and ${content.vouchers.length} voucher(s), plus website text and settings? Draft products and all voucher codes will be publicly readable. Check that the content does not contain private information. Orders and media will NOT be imported. Existing cloud content will not be overwritten.`)) return;
+          const result = await Store.importBackup(source);
+          if (!result.ok) { UI.toast(result.message,"error"); return; }
+          UI.toast("Backup imported to Supabase."); App.refresh();
+        } catch(err) { UI.toast(err.message,"error"); }
+      });
+    }
   };
 
   /* ---------- Products ---------- */
@@ -172,19 +215,22 @@ const AdminViews = (() => {
     addPath() {
       const input = document.getElementById("pf-image-path");
       const v = input.value.trim();
-      if (!v) { UI.toast("Enter an image path or URL first.", "error"); return; }
+      if (!HaadiyaMedia.isUrl(v)) { UI.toast("Enter a public HTTPS image URL or upload a file.", "error"); return; }
       (PE.photos[PE.key] = PE.photos[PE.key] || []).push(v);
       input.value = ""; renderPhotos();
     },
     async upload(files) {
-      for (const file of files) {
+      const editor=PE, key=PE.key; if(editor.uploading){UI.toast("Wait for the current photo selection.","error");return;} editor.uploading=true;
+      try { for (const file of files) {
         try {
           const url = await UI.readImageFile(file, { maxDim: 1200 });
-          (PE.photos[PE.key] = PE.photos[PE.key] || []).push(url);
+          if (PE===editor) (editor.photos[key] = editor.photos[key] || []).push(url);
         } catch (err) { UI.toast(`${file.name}: ${err.message}`, "error"); }
       }
+      } finally {editor.uploading=false;}
+      if(PE!==editor)return;
       renderPhotos();
-      UI.toast("Photo added — click Save Product to apply.");
+      UI.toast("Click Save Product to upload and apply selected photos.");
     }
   };
 
@@ -240,11 +286,11 @@ const AdminViews = (() => {
             <input type="file" id="photo-file" accept="image/jpeg,image/png" multiple hidden>
             <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
               <button type="button" class="btn btn-outline btn-sm" data-action="photo-upload">${icon("plus")} Upload Photos</button>
-              <span class="hint">Photos are downscaled automatically (max 1200px) to fit browser storage.</span>
+              <span class="hint">Photos are downscaled automatically (max 1200px) before uploading to Supabase Storage.</span>
             </div>
             <details style="margin-top:8px"><summary style="font-size:13px;cursor:pointer;color:var(--text-2)">Or add via manual path / URL</summary>
               <div style="display:flex;gap:8px;margin-top:8px">
-                <input type="text" id="pf-image-path" placeholder="../images/photo.jpg or https://…" style="flex:1;background:var(--ivory);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;font-size:13.5px">
+                <input type="text" id="pf-image-path" placeholder="https://…" style="flex:1;background:var(--ivory);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;font-size:13.5px">
                 <button type="button" class="btn btn-outline btn-sm" data-action="photo-add-path">Add</button>
               </div></details>
           </div>
@@ -272,8 +318,9 @@ const AdminViews = (() => {
       document.getElementById("variant-table").addEventListener("input", e => {
         if (e.target.dataset.vfield === "color") renderPhotoTabs();
       });
-      form.addEventListener("submit", e => {
+      form.addEventListener("submit", async e => {
         e.preventDefault();
+        if(PE.uploading){UI.toast("Wait for photo processing to finish.","error");return;}
         const ok = UI.validateForm(form, {
           "pf-name": { required: true },
           "pf-slug": { required: true },
@@ -316,7 +363,12 @@ const AdminViews = (() => {
           images: [...(PE.photos[""] || [])], colorImages,
           variants
         };
-        const res = isNew ? Store.addProduct(patch) : Store.updateProduct(q.slug, patch);
+        if (!isNew && existing) {
+          if (JSON.stringify(patch.images) === JSON.stringify(existing.images || [])) delete patch.images;
+          if (JSON.stringify(patch.colorImages) === JSON.stringify(existing.colorImages || {})) delete patch.colorImages;
+        }
+        const submit=form.querySelector("button[type=submit]");submit.disabled=true;
+        let res;try{res=await (isNew ? Store.addProduct(patch) : Store.updateProduct(q.slug, patch));}finally{submit.disabled=false;}
         if (!res.ok) { UI.toast(res.message, "error"); return; }
         UI.toast("Product saved — the public catalog now uses the latest data.");
         App.go("#/admin/produk");
@@ -365,22 +417,12 @@ const AdminViews = (() => {
     },
     mount() {}
   };
-  function saveAllStock() {
-    const inputs = [...document.querySelectorAll("[data-stock-sku]")];
-    let changed = 0, failed = 0;
-    for (const input of inputs) {
-      const sku = input.dataset.stockSku;
-      const found = Store.variant(sku);
-      if (!found) continue;
-      const val = Number(input.value);
-      if (val === found.variant.stock) continue;
-      const res = Store.setStock(sku, val, "admin", "Adjustment from inventory page");
-      if (res.ok) changed++;
-      else { failed++; UI.toast(`${sku}: ${res.message}`, "error"); }
-    }
-    if (changed) UI.toast(`${changed} SKU(s) updated — the public catalog uses the new stock.`);
-    else if (!failed) UI.toast("No stock changes.");
-    App.refresh();
+  async function saveAllStock() {
+    const changes = [...document.querySelectorAll("[data-stock-sku]")].map(input => [input.dataset.stockSku,Number(input.value)]).filter(([sku,n]) => Store.variant(sku) && Store.variant(sku).variant.stock !== n);
+    if (!changes.length) { UI.toast("No stock changes."); return; }
+    const res = await Store.setStocks(changes);
+    if (!res.ok) { UI.toast(res.message,"error"); return; }
+    UI.toast(`${changes.length} SKU(s) saved to Supabase.`); App.refresh();
   }
 
   /* ---------- Orders ---------- */
@@ -431,7 +473,7 @@ const AdminViews = (() => {
     },
     mount() {
       const form = document.getElementById("order-filter");
-      form.addEventListener("submit", e => {
+      form.addEventListener("submit", async e => {
         e.preventDefault();
         const parts = [];
         const qv = form.querySelector("#of-q").value.trim();
@@ -504,7 +546,7 @@ const AdminViews = (() => {
     mount(q) {
       const form = document.getElementById("fulfillment-form");
       if (!form) return;
-      form.addEventListener("submit", e => {
+      form.addEventListener("submit", async e => {
         e.preventDefault();
         const status = form.querySelector("#ff-status").value;
         if (!status) { UI.toast("Choose a new status first.", "error"); return; }
@@ -570,11 +612,11 @@ const AdminViews = (() => {
     },
     mount() {
       const form = document.getElementById("voucher-form");
-      form.addEventListener("submit", e => {
+      form.addEventListener("submit", async e => {
         e.preventDefault();
         if (!UI.validateForm(form, { "vf-code": { required: true }, "vf-value": { required: true } })) return;
         const val = id => form.querySelector("#" + id).value.trim();
-        const res = Store.saveVoucher({
+        const res = await Store.saveVoucher({
           code: val("vf-code"), type: val("vf-type"), value: Number(val("vf-value")),
           minSubtotal: Number(val("vf-min")) || 0,
           maxDiscount: val("vf-max") ? Number(val("vf-max")) : null,
@@ -620,7 +662,7 @@ const AdminViews = (() => {
             </div>
             <details style="margin-top:8px"><summary style="font-size:13px;cursor:pointer;color:var(--text-2)">Or set via path / URL</summary>
               <div style="display:flex;gap:8px;margin-top:8px">
-                <input type="text" id="hero-path" placeholder="../images/hero.jpg or https://…" style="flex:1;background:var(--ivory);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;font-size:13.5px">
+                <input type="text" id="hero-path" placeholder="https://…" style="flex:1;background:var(--ivory);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;font-size:13.5px">
                 <button type="button" class="btn btn-outline btn-sm" data-action="hero-add-path">Set</button>
               </div></details>
           </div>
@@ -637,10 +679,10 @@ const AdminViews = (() => {
             </div>
             <details style="margin-top:8px"><summary style="font-size:13px;cursor:pointer;color:var(--text-2)">Or set via path / URL</summary>
               <div style="display:flex;gap:8px;margin-top:8px">
-                <input type="text" id="hero-video-path" placeholder="../videos/hero.mp4 or https://…" style="flex:1;background:var(--ivory);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;font-size:13.5px">
+                <input type="text" id="hero-video-path" placeholder="https://…" style="flex:1;background:var(--ivory);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;font-size:13.5px">
                 <button type="button" class="btn btn-outline btn-sm" data-action="hero-video-add-path">Set</button>
               </div></details>
-            <p class="hint" style="margin-top:10px">Plays muted, looping, without controls on the landing page (with a pause button). Visitors with reduced-motion see the photo instead. Max upload 60 MB — larger files: use a path/URL. Uploaded videos live in this browser only; for production, host the MP4 and use its URL.</p>
+            <p class="hint" style="margin-top:10px">Plays muted, looping, without controls on the landing page (with a pause button). Visitors with reduced-motion see the photo instead. Max upload 50 MB. Compress videos for faster loading. Uploaded videos are saved to Supabase Storage.</p>
           </div>
           <button class="btn btn-primary btn-sm" style="margin-top:16px" data-action="landing-save">${icon("check")} Save Landing Page</button>
         </div>
@@ -689,7 +731,8 @@ const AdminViews = (() => {
         if (!file) return;
         try {
           const url = await UI.readImageFile(file, { maxDim: 1600 });
-          Store.updateSettings({ heroImage: url });
+          const saved = await Store.updateSettings({ heroImage: url });
+          if (!saved.ok) { UI.toast(saved.message, "error"); return; }
           UI.toast("Hero image updated.");
           App.refresh();
         } catch (err) { UI.toast(err.message, "error"); }
@@ -701,8 +744,8 @@ const AdminViews = (() => {
         if (!file) return;
         try {
           UI.validateVideoFile(file);
-          await UI.VideoStore.put("hero", file);
-          Store.updateSettings({ heroVideo: "idb:hero" });
+          const saved = await Store.updateSettings({ heroVideo: file });
+          if (!saved.ok) { UI.toast(saved.message, "error"); return; }
           await App.resolveHeroVideo();
           UI.toast("Hero video updated — the landing page now plays it.");
           App.refresh();
@@ -710,20 +753,22 @@ const AdminViews = (() => {
       });
     }
   };
-  function saveLanding() {
+  async function saveLanding() {
     const title = document.getElementById("lp-title").value.trim();
     const text = document.getElementById("lp-text").value.trim();
     if (!title) { UI.toast("The hero headline cannot be empty.", "error"); return; }
-    Store.updateSettings({ heroTitle: title, heroText: text });
+    const saved = await Store.updateSettings({ heroTitle: title, heroText: text });
+    if (!saved.ok) { UI.toast(saved.message, "error"); return; }
     UI.toast("Landing page saved — the storefront uses the new copy.");
     App.refresh();
   }
-  function saveBanner() {
-    Store.updateSettings({ bannerText: document.getElementById("banner-text").value.trim() });
+  async function saveBanner() {
+    const saved = await Store.updateSettings({ bannerText: document.getElementById("banner-text").value.trim() });
+    if (!saved.ok) { UI.toast(saved.message, "error"); return; }
     UI.toast("Banner saved.");
     App.refresh();
   }
-  function savePage(id) {
+  async function savePage(id) {
     const pages = JSON.parse(JSON.stringify(Store.settings().pages || {}));
     if (id === "about") {
       pages.about = {
@@ -734,14 +779,16 @@ const AdminViews = (() => {
     } else {
       pages[id] = document.getElementById("pg-" + id).value;
     }
-    Store.updateSettings({ pages });
+    const saved = await Store.updateSettings({ pages });
+    if (!saved.ok) { UI.toast(saved.message, "error"); return; }
     UI.toast("Page saved — the storefront uses the new copy.");
     App.refresh();
   }
-  function resetPage(id) {
+  async function resetPage(id) {
     const pages = JSON.parse(JSON.stringify(Store.settings().pages || {}));
     pages[id] = JSON.parse(JSON.stringify(window.HAADIYA_SEED.settings.pages[id]));
-    Store.updateSettings({ pages });
+    const saved = await Store.updateSettings({ pages });
+    if (!saved.ok) { UI.toast(saved.message, "error"); return; }
     UI.toast("Page restored to the default text.");
     App.refresh();
   }
@@ -814,20 +861,22 @@ const AdminViews = (() => {
           if (!file) return;
           try {
             const url = await UI.readImageFile(file, { maxDim: 400, keepPng: true });
-            Store.updateSettings({ [slot === "footer" ? "logoFooter" : "logoHeader"]: url });
+            const saved = await Store.updateSettings({ [slot === "footer" ? "logoFooter" : "logoHeader"]: url });
+            if (!saved.ok) { UI.toast(saved.message, "error"); return; }
             UI.toast(`${slot === "footer" ? "Footer" : "Header"} logo updated.`);
             App.refresh();
           } catch (err) { UI.toast(err.message, "error"); }
         });
       }
       const form = document.getElementById("settings-form");
-      form.addEventListener("submit", e => {
+      form.addEventListener("submit", async e => {
         e.preventDefault();
         const val = id => form.querySelector("#" + id).value.trim();
-        Store.updateSettings({
+        const saved = await Store.updateSettings({
           email: val("set-email"), phone: val("set-phone"),
           instagram: val("set-instagram"), shopee: val("set-shopee"), linktree: val("set-linktree")
         });
+        if (!saved.ok) { UI.toast(saved.message, "error"); return; }
         UI.toast("Settings saved — public contact details updated.");
         App.refresh();
       });
